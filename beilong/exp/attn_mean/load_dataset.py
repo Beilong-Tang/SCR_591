@@ -94,10 +94,10 @@ def prepare_data(device, args):
     for i in range(args.num_hops+1):
         if args.giant:
             print(f"load feat_{i}_giant.pt")
-            feats.append(torch.load(f"./{args.dataset}/feat/{args.dataset}_feat_{i}_giant.pt"))
+            feats.append(torch.load(f"{args.root}/{args.dataset}/feat/{args.dataset}_feat_{i}_giant.pt"))
         else:
             print(f"load feat_{i}.pt")
-            feats.append(torch.load(f"./{args.dataset}/feat/{args.dataset}_feat_{i}.pt"))
+            feats.append(torch.load(f"{args.root}/{args.dataset}/feat/{args.dataset}_feat_{i}.pt"))
     in_feats=feats[0].shape[1]
 
     if args.dataset == 'ogbn-products':
