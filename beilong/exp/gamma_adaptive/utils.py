@@ -83,7 +83,7 @@ def consis_loss_mean_teacher(p_t,p_s, temp, lam):
     loss = lam * loss
     return loss,kl
 
-def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, device, xs, labels, label_emb, predict_prob,args,enhance_loader_cons):
+def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, device, xs, labels, label_emb, predict_prob,args,enhance_loader_cons, stage, epoch, epochs):
     model.train()
     loss_fcn = nn.CrossEntropyLoss()
     y_true, y_pred = [], []
@@ -114,7 +114,10 @@ def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, 
         teacher_prob = torch.max(teacher_soft, dim=1, keepdim=True)[0]
         L3 = (teacher_prob*(teacher_soft*(torch.log(teacher_soft+1e-8)-torch.log_softmax(output_att[len(idx_1):], dim=1)))).sum(1).mean()*(len(idx_2)*1.0/(len(idx_1)+len(idx_2)))
 
-        loss = L1 + L3*args.gama+loss_consis
+        gama = stage/len(args.stages) * args.gama * (epoch+1)/epochs
+
+
+        loss = L1 + L3*gama+loss_consis
         loss.backward()
         optimizer.step()
         y_true.append(labels[idx_1].to(torch.long))

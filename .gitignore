@@ -4,3 +4,5 @@ ogbn_products/
 __pycache__/
 
 output/
+
+result.txt
