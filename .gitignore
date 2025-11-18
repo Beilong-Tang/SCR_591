@@ -7,4 +7,6 @@ output/
 
 result.txt
 
+# logging purpose
 *.log
+log/
