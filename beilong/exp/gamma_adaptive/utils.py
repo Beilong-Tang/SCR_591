@@ -54,9 +54,7 @@ def set_seed(seed=0):
 def consis_loss(logps, temp, lam):
     ps = [torch.exp(p) for p in logps]
     ps = torch.stack(ps, dim=2)
-    print("ps", ps.shape)
     avg_p = torch.mean(ps, dim=2)
-    print("avg_p ", avg_p.shape)
     sharp_p = (torch.pow(avg_p, 1. / temp) / torch.sum(torch.pow(avg_p, 1. / temp), dim=1, keepdim=True)).detach()
     sharp_p = sharp_p.unsqueeze(2)
     
@@ -115,7 +113,6 @@ def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, 
         L3 = (teacher_prob*(teacher_soft*(torch.log(teacher_soft+1e-8)-torch.log_softmax(output_att[len(idx_1):], dim=1)))).sum(1).mean()*(len(idx_2)*1.0/(len(idx_1)+len(idx_2)))
 
         gama = stage/len(args.stages) * args.gama * (epoch+1)/epochs
-
 
         loss = L1 + L3*gama+loss_consis
         loss.backward()
