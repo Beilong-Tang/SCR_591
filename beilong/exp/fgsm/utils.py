@@ -81,48 +81,138 @@ def consis_loss_mean_teacher(p_t,p_s, temp, lam):
     loss = lam * loss
     return loss,kl
 
-def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, device, xs, labels, label_emb, predict_prob,args,enhance_loader_cons, stage, epoch, epochs):
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator,
+                     device, xs, labels, label_emb, predict_prob, args,
+                     enhance_loader_cons, stage, epoch, epochs):
+    """
+    Training step for RLU with SCR and FGSM adversarial consistency.
+
+    model: GNN model
+    train_loader: labeled batch indices
+    enhance_loader: unlabeled / pseudo-label batch indices
+    enhance_loader_cons: batch indices for SCR consistency
+    xs: list of feature matrices
+    labels: ground truth labels
+    label_emb: label embeddings
+    predict_prob: pseudo-label probabilities for unlabeled data
+    args: contains hyperparameters like tem, lam, fgsm_eps, gama, stages
+    stage, epoch, epochs: training stage info for curriculum
+    """
+    
     model.train()
     loss_fcn = nn.CrossEntropyLoss()
     y_true, y_pred = [], []
-
     total_loss = 0
-    iter_num=0
-    for idx_1, idx_2 ,idx_3 in zip(train_loader, enhance_loader,enhance_loader_cons):
-        logits = []
+    iter_num = 0
+
+    for idx_1, idx_2, idx_3 in zip(train_loader, enhance_loader, enhance_loader_cons):
+
+        # -----------------------------
+        # Prepare features
+        # -----------------------------
         idx = torch.cat((idx_1, idx_2), dim=0)
         feat_list = [x[idx].to(device) for x in xs]
-
         batch_feats = [x[idx_3].to(device) for x in xs]
 
         y = labels[idx_1].to(torch.long).to(device)
         optimizer.zero_grad()
-        output_att = model(feat_list, label_emb[idx].to(device))
-        
+
+        # -----------------------------
+        # 1. Clean forward pass
+        # -----------------------------
+        logits_clean = model(feat_list, label_emb[idx].to(device))
+
+        # -----------------------------
+        # 2. SCR consistency loss (original)
+        # -----------------------------
         output_att_f = model(batch_feats, label_emb[idx_3].to(device))
-        
         output_att_cons = model(batch_feats, label_emb[idx_3].to(device))
+        logps_scr = [
+            torch.log_softmax(output_att_cons, dim=-1),
+            torch.log_softmax(output_att_f, dim=-1)
+        ]
+        loss_consis = consis_loss(logps_scr, args.tem, args.lam)
 
-        logits.append(torch.log_softmax(output_att_cons, dim=-1))
-        logits.append(torch.log_softmax(output_att_f, dim=-1))
-        loss_consis = consis_loss(logits, args.tem, args.lam)
+        # -----------------------------
+        # 3. Supervised loss
+        # -----------------------------
+        L1 = loss_fcn(logits_clean[:len(idx_1)], y) * (len(idx_1) / (len(idx_1) + len(idx_2)))
 
-        L1 = loss_fcn(output_att[:len(idx_1)],  y)*(len(idx_1)*1.0/(len(idx_1)+len(idx_2)))
+        # -----------------------------
+        # 4. Pseudo-label / teacher loss
+        # -----------------------------
         teacher_soft = predict_prob[idx_2].to(device)
         teacher_prob = torch.max(teacher_soft, dim=1, keepdim=True)[0]
-        L3 = (teacher_prob*(teacher_soft*(torch.log(teacher_soft+1e-8)-torch.log_softmax(output_att[len(idx_1):], dim=1)))).sum(1).mean()*(len(idx_2)*1.0/(len(idx_1)+len(idx_2)))
+        L3 = (teacher_prob * (
+            teacher_soft * (torch.log(teacher_soft + 1e-8) -
+            torch.log_softmax(logits_clean[len(idx_1):], dim=1))
+        )).sum(1).mean() * (len(idx_2) / (len(idx_1) + len(idx_2)))
 
-        loss = L1 + L3*args.gama+loss_consis
+        gama = args.gama
+
+        # -----------------------------
+        # 5. FGSM adversarial consistency
+        # -----------------------------
+        # Create adversarial copy of features
+        feat_list_adv = [f.clone().detach().requires_grad_(True) for f in feat_list]
+
+        # Forward on adversarial copy
+        logits_adv_probe = model(feat_list_adv, label_emb[idx].to(device))
+
+        # Build views for consis_loss
+        logps_adv_probe = [
+            torch.log_softmax(logits_clean, dim=-1),
+            torch.log_softmax(logits_adv_probe, dim=-1)
+        ]
+
+        # Compute adversarial loss and gradients
+        loss_adv_obj = consis_loss(logps_adv_probe, temp=args.tem, lam=1.0)
+        optimizer.zero_grad()
+        loss_adv_obj.backward(retain_graph=True)
+
+        # FGSM step
+        eps = getattr(args, "fgsm_eps", 1e-2)
+        delta_feats = [eps * f.grad.sign() for f in feat_list_adv]
+        feat_list_perturbed = [f + d for f, d in zip(feat_list, delta_feats)]
+
+        # Forward on perturbed features
+        logits_adv = model(feat_list_perturbed, label_emb[idx].to(device))
+
+        # FGSM consistency loss
+        logps_adv = [
+            torch.log_softmax(logits_clean, dim=-1),
+            torch.log_softmax(logits_adv, dim=-1)
+        ]
+        loss_adv_consistency = consis_loss(logps_adv, temp=args.tem, lam=args.lam)
+
+        # -----------------------------
+        # 6. Total loss
+        # -----------------------------
+        loss = L1 + L3 * gama + loss_consis + loss_adv_consistency
+
+        # -----------------------------
+        # 7. Backward & optimizer step
+        # -----------------------------
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        # -----------------------------
+        # 8. Track predictions and accuracy
+        # -----------------------------
         y_true.append(labels[idx_1].to(torch.long))
-        y_pred.append(output_att[:len(idx_1)].argmax(dim=-1, keepdim=True).cpu())
-        total_loss += loss
+        y_pred.append(logits_clean[:len(idx_1)].argmax(dim=-1, keepdim=True).cpu())
+        total_loss += loss.item()
         iter_num += 1
 
-    loss = total_loss / iter_num
-    approx_acc = evaluator(torch.cat(y_true, dim=0),torch.cat(y_pred, dim=0))
-    return loss, approx_acc
+    loss_avg = total_loss / iter_num
+    approx_acc = evaluator(torch.cat(y_true, dim=0), torch.cat(y_pred, dim=0))
+    return loss_avg, approx_acc
+
 
 def train_rlu(model, train_loader, enhance_loader, optimizer, evaluator, device, xs, labels, label_emb, predict_prob,gama):
     model.train()

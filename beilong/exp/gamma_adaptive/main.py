@@ -134,7 +134,7 @@ def run(args, device, logger):
             ema.register()
         else:
             ema = None
-        logger.info("# Params:", get_n_params(model))
+        logger.info(f"# Params: {get_n_params(model)}")
 
         loss_fcn = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,

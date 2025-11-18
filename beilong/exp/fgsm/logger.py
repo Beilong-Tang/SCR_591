@@ -36,7 +36,7 @@ def setup_logger(log_dir: str, rank: int, out=True):
         os.makedirs(log_dir, exist_ok=True)
         logging.basicConfig(
             level=logging.INFO,
-            format="%(asctime)s,%(name)s,%(levelname)s,%(message)s",
+            format="%(asctime)s|%(message)s",
             handlers=[
                 logging.FileHandler(f"{log_dir}/{now}.log"),
                 logging.StreamHandler(),
