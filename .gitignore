@@ -6,3 +6,7 @@ __pycache__/
 output/
 
 result.txt
+
+# logging purpose
+*.log
+log/
