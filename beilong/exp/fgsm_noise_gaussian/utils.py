@@ -189,10 +189,33 @@ def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator,
         ]
         loss_adv_consistency = consis_loss(logps_adv, temp=args.tem, lam=args.lam)
 
+        # ---------------------------------------------------------
+        # 6. Gaussian Noise Consistency Loss
+        # ---------------------------------------------------------
+
+        # Sample two Gaussian noises (different ones)
+        noise1 = [torch.randn_like(f) * 0.02 for f in feat_list]
+        noise2 = [torch.randn_like(f) * 0.02 for f in feat_list]
+
+        # Create two perturbed versions
+        feat_list_noisy1 = [f + n for f, n in zip(feat_list, noise1)]
+        feat_list_noisy2 = [f + n for f, n in zip(feat_list, noise2)]
+
+        # Forward pass through model
+        logits_noisy1 = model(feat_list_noisy1, label_emb[idx].to(device))
+        logits_noisy2 = model(feat_list_noisy2, label_emb[idx].to(device))
+
+        # Gaussian consistency loss
+        logps_gauss = [
+            torch.log_softmax(logits_noisy1, dim=-1),
+            torch.log_softmax(logits_noisy2, dim=-1)
+        ]
+        loss_gauss_consistency = consis_loss(logps_gauss, temp=args.tem, lam=args.lam)
+
         # -----------------------------
         # 6. Total loss
         # -----------------------------
-        loss = L1 + L3 * gama + loss_consis + loss_adv_consistency
+        loss = L1 + L3 * gama + loss_consis + loss_adv_consistency + loss_gauss_consistency
 
         # -----------------------------
         # 7. Backward & optimizer step
