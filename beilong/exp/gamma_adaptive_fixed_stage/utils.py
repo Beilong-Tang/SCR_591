@@ -112,7 +112,7 @@ def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, 
         teacher_prob = torch.max(teacher_soft, dim=1, keepdim=True)[0]
         L3 = (teacher_prob*(teacher_soft*(torch.log(teacher_soft+1e-8)-torch.log_softmax(output_att[len(idx_1):], dim=1)))).sum(1).mean()*(len(idx_2)*1.0/(len(idx_1)+len(idx_2)))
 
-        gama = stage/len(args.stages) * args.gama * (epoch+1)/epochs
+        gama = (stage+1)/len(args.stages) * args.gama
 
         loss = L1 + L3*gama+loss_consis
         loss.backward()

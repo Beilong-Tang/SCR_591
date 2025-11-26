@@ -409,8 +409,6 @@ if __name__ == "__main__":
     
     parser.add_argument("--giant", action="store_true")
 
-    parser.add_argument("--gamma_strategy", type=str, default='dynamic')
-
     args = parser.parse_args()
     print(args)
     main(args)
