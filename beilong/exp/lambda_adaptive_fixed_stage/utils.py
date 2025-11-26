@@ -105,14 +105,16 @@ def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, 
 
         logits.append(torch.log_softmax(output_att_cons, dim=-1))
         logits.append(torch.log_softmax(output_att_f, dim=-1))
-        loss_consis = consis_loss(logits, args.tem, args.lam)
+
+        lam = (stage+1)/len(args.stages) * args.lam
+        loss_consis = consis_loss(logits, args.tem, lam)
 
         L1 = loss_fcn(output_att[:len(idx_1)],  y)*(len(idx_1)*1.0/(len(idx_1)+len(idx_2)))
         teacher_soft = predict_prob[idx_2].to(device)
         teacher_prob = torch.max(teacher_soft, dim=1, keepdim=True)[0]
         L3 = (teacher_prob*(teacher_soft*(torch.log(teacher_soft+1e-8)-torch.log_softmax(output_att[len(idx_1):], dim=1)))).sum(1).mean()*(len(idx_2)*1.0/(len(idx_1)+len(idx_2)))
 
-        gama = (stage+1)/len(args.stages) * args.gama
+        gama = args.gama
 
         loss = L1 + L3*gama+loss_consis
         loss.backward()
