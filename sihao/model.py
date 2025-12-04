@@ -373,3 +373,105 @@ class R_GAMLP_RLU(nn.Module):  # recursive GAMLP
         return right_1
 
 
+class ConsistencyMultiheadAttention(nn.Module):
+    """
+    Multihead Attention for consistency loss aggregation.
+    Uses learnable query instead of average prediction.
+    
+    Args:
+        num_classes: number of classes (prediction dimension)
+        num_heads: number of attention heads (equals K, number of forward passes)
+        d_model: projection dimension (default: num_classes)
+        dropout: dropout rate for attention weights
+    """
+    def __init__(self, num_classes, num_heads, d_model=None, dropout=0.1):
+        super(ConsistencyMultiheadAttention, self).__init__()
+        self.num_classes = num_classes
+        self.num_heads = num_heads
+        self.d_model = d_model if d_model else num_classes
+        # Adjust d_model to be divisible by num_heads
+        if self.d_model % num_heads != 0:
+            self.d_model = ((self.d_model // num_heads) + 1) * num_heads
+        self.d_k = self.d_model // num_heads  # dimension per head
+        
+        # Learnable query vector [1, d_model]
+        self.query = nn.Parameter(torch.FloatTensor(1, self.d_model))
+        
+        # Key and Value projection layers
+        self.W_k = nn.Linear(num_classes, self.d_model)
+        self.W_v = nn.Linear(num_classes, self.d_model)
+        
+        # Output projection (optional, to map back to num_classes)
+        self.W_o = nn.Linear(self.d_model, num_classes)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.scale = self.d_k ** -0.5
+        
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Initialize parameters"""
+        gain = nn.init.calculate_gain("relu")
+        # Initialize learnable query
+        nn.init.xavier_normal_(self.query, gain=gain)
+        # Initialize projection layers
+        nn.init.xavier_uniform_(self.W_k.weight, gain=gain)
+        nn.init.xavier_uniform_(self.W_v.weight, gain=gain)
+        nn.init.xavier_uniform_(self.W_o.weight, gain=gain)
+        nn.init.zeros_(self.W_k.bias)
+        nn.init.zeros_(self.W_v.bias)
+        nn.init.zeros_(self.W_o.bias)
+    
+    def forward(self, predictions):
+        """
+        Apply multihead attention to aggregate K predictions.
+        
+        Args:
+            predictions: [Batch, Num_Classes, K] - K predictions from different forward passes
+        
+        Returns:
+            attended: [Batch, Num_Classes] - aggregated prediction
+            att_weights: [Batch, K] - attention weights for each prediction
+        """
+        B, C, num_passes = predictions.shape
+        
+        # Transpose to [B, num_passes, C] for linear projection
+        preds = predictions.transpose(1, 2)  # [B, num_passes, C]
+        
+        # Expand learnable query to batch size: [1, d_model] -> [B, 1, d_model]
+        Q = self.query.unsqueeze(0).expand(B, -1, -1)  # [B, 1, d_model]
+        
+        # Project keys and values
+        K_proj = self.W_k(preds)  # [B, num_passes, d_model]
+        V_proj = self.W_v(preds)  # [B, num_passes, d_model]
+        
+        # Reshape for multi-head attention: [B, num_heads, seq_len, d_k]
+        Q = Q.view(B, 1, self.num_heads, self.d_k).transpose(1, 2)  # [B, num_heads, 1, d_k]
+        K_proj = K_proj.view(B, num_passes, self.num_heads, self.d_k).transpose(1, 2)  # [B, num_heads, num_passes, d_k]
+        V_proj = V_proj.view(B, num_passes, self.num_heads, self.d_k).transpose(1, 2)  # [B, num_heads, num_passes, d_k]
+        
+        # Compute attention scores: Q @ K^T / sqrt(d_k)
+        scores = torch.matmul(Q, K_proj.transpose(-2, -1)) * self.scale  # [B, num_heads, 1, num_passes]
+        
+        # Apply softmax to get attention weights
+        att_weights = F.softmax(scores, dim=-1)  # [B, num_heads, 1, num_passes]
+        att_weights = self.dropout(att_weights)
+        
+        # Weighted aggregation: att_weights @ V
+        attended = torch.matmul(att_weights, V_proj)  # [B, num_heads, 1, d_k]
+        
+        # Concatenate heads and reshape
+        attended = attended.transpose(1, 2).contiguous().view(B, 1, self.d_model)  # [B, 1, d_model]
+        
+        # Project back to num_classes
+        attended = self.W_o(attended)  # [B, 1, num_classes]
+        attended = attended.squeeze(1)  # [B, num_classes]
+        
+        # Average attention weights across heads for visualization
+        # att_weights: [B, num_heads, 1, num_passes] -> mean -> [B, 1, num_passes] -> squeeze -> [B, num_passes]
+        att_weights_avg = att_weights.mean(dim=1)  # [B, 1, num_passes]
+        att_weights_avg = att_weights_avg.squeeze(1)  # [B, num_passes]
+        
+        return attended, att_weights_avg
+
+
