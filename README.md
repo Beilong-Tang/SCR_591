@@ -7,4 +7,4 @@
 - `fgsm_noise_gaussian`: Gaussian Noise
 
 `sihao` contains code and experiments implemented by Sihao Liu.
-- Attention masking
+- Attention average
