@@ -63,19 +63,61 @@ def consis_loss(logps, temp, lam):
     mse = lam * mse
     return mse
 
-def consis_loss_entropy_attention(logps, temp, lam):
+def consis_loss_multihead_attention(logps, temp, lam, mha_module):
     """
-    Consistency loss with entropy-based attention mechanism.
+    Consistency loss with learnable multihead attention mechanism.
+    
+    Uses a learnable query vector to attend over K predictions (from dropout),
+    where each prediction corresponds to one attention head.
+    
+    Args:
+        logps: list of log_softmax predictions [Batch, Num_Classes]
+        temp: temperature parameter for sharpening
+        lam: weight for consistency loss
+        mha_module: ConsistencyMultiheadAttention module
+        
+    Returns:
+        mse: weighted consistency loss
+    """
+    # logps: list of [Batch, Num_Classes]
+    # ps: [Batch, Num_Classes, K_Passes]
+    ps = [torch.exp(p) for p in logps]
+    ps = torch.stack(ps, dim=2)  # [B, C, K]
+    
+    # ---------------- Multihead Attention Aggregation ----------------
+    # Use learnable query to attend over K predictions
+    avg_p, att_weights = mha_module(ps)  # [B, C], [B, K]
+    # ---------------- Multihead Attention End ----------------
+    
+    # Sharpening (same as before)
+    sharp_p = (torch.pow(avg_p, 1. / temp) / torch.sum(torch.pow(avg_p, 1. / temp), dim=1, keepdim=True)).detach()
+    sharp_p = sharp_p.unsqueeze(2)
+    
+    # Compute MSE loss
+    mse = torch.mean(torch.sum(torch.pow(ps - sharp_p, 2), dim=1, keepdim=True))
+    mse = lam * mse
+    return mse
+
+def consis_loss_entropy_attention(logps, temp, lam, entropy_temp=2.0, mix_alpha=0.5):
+    """
+    Consistency loss with entropy-based attention mechanism (smoothed version).
     
     Instead of naively averaging the noisy predictions (which treats high-uncertainty 
     and low-uncertainty predictions equally), this function uses an Entropy-based 
     Attention Mechanism that dynamically re-weights the predictions based on their 
     intrinsic confidence, assigning higher importance to predictions with lower entropy.
     
+    **Key Improvement**: When only 2 predictions are available, the original entropy 
+    weighting can be too extreme. This version uses:
+    1. Temperature-smoothing to prevent extreme weight assignments
+    2. Mixing with simple average to maintain regularization benefits
+    
     Args:
         logps: list of log_softmax predictions [Batch, Num_Classes]
         temp: temperature parameter for sharpening
         lam: weight for consistency loss
+        entropy_temp: temperature for entropy-based attention (higher = smoother weights)
+        mix_alpha: mixing ratio (0.5 = 50% entropy weighting + 50% simple average)
         
     Returns:
         mse: weighted consistency loss
@@ -85,23 +127,29 @@ def consis_loss_entropy_attention(logps, temp, lam):
     ps = [torch.exp(p) for p in logps]
     ps = torch.stack(ps, dim=2)
     
-    # ---------------- Entropy-based Attention ----------------
+    # ---------------- Entropy-based Attention (Smoothed) ----------------
     # 1. 计算每个预测分支的信息熵 (Entropy)
     # H(p) = - sum(p * log(p))
     # ps shape: [N, C, K] -> entropy shape: [N, K]
     entropy = -torch.sum(ps * torch.log(ps + 1e-8), dim=1)
     
-    # 2. 计算 Attention 权重
-    # 我们希望熵越小，权重越大，所以取负号 (-entropy)
-    # 然后过一个 Softmax，让 K 次预测的权重之和为 1
-    # att_weights shape: [N, K]
-    att_weights = F.softmax(-entropy, dim=1)
+    # 2. 计算 Attention 权重（使用温度参数平滑化）
+    # 使用 entropy_temp 控制权重分配的极端程度
+    # entropy_temp 越大，权重分配越平滑（接近均匀分布）
+    # entropy_temp 越小，权重分配越极端（高熵低权重）
+    att_weights_entropy = F.softmax(-entropy / entropy_temp, dim=1)
     
-    # 3. 调整维度以便进行加权求和
+    # 3. 混合策略：结合熵权法和简单平均
+    # 这样可以避免在只有2个预测时权重过于极端
+    num_passes = ps.shape[2]
+    att_weights_uniform = torch.ones_like(att_weights_entropy) / num_passes
+    att_weights = mix_alpha * att_weights_entropy + (1 - mix_alpha) * att_weights_uniform
+    
+    # 4. 调整维度以便进行加权求和
     # [N, K] -> [N, 1, K]
     att_weights = att_weights.unsqueeze(1)
     
-    # 4. 加权求和 (Weighted Sum) 代替简单的 Mean
+    # 5. 加权求和 (Weighted Sum) 代替简单的 Mean
     # ps: [N, C, K] * att_weights: [N, 1, K] -> 结果 [N, C, K]
     # 然后在 dim=2 (K维度) 上求和 -> [N, C]
     avg_p = torch.sum(ps * att_weights, dim=2)
@@ -133,13 +181,18 @@ def consis_loss_mean_teacher(p_t,p_s, temp, lam):
     loss = lam * loss
     return loss,kl
 
-def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, device, xs, labels, label_emb, predict_prob,args,enhance_loader_cons):
+def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, device, xs, labels, label_emb, predict_prob,args,enhance_loader_cons, mha_module=None):
     model.train()
     loss_fcn = nn.CrossEntropyLoss()
     y_true, y_pred = [], []
 
     total_loss = 0
     iter_num=0
+    # K: number of forward passes for consistency loss (default: 2)
+    num_passes = getattr(args, 'num_passes', 2)
+    # Use multihead attention if mha_module is provided, otherwise use entropy attention
+    use_mha = mha_module is not None
+    
     for idx_1, idx_2 ,idx_3 in zip(train_loader, enhance_loader,enhance_loader_cons):
         logits = []
         idx = torch.cat((idx_1, idx_2), dim=0)
@@ -151,14 +204,17 @@ def train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, 
         optimizer.zero_grad()
         output_att = model(feat_list, label_emb[idx].to(device))
         
-        output_att_f = model(batch_feats, label_emb[idx_3].to(device))
+        # Generate K predictions with dropout for consistency loss
+        # Each forward pass with dropout will produce a different prediction
+        for _ in range(num_passes):
+            output_pass = model(batch_feats, label_emb[idx_3].to(device))
+            logits.append(torch.log_softmax(output_pass, dim=-1))
         
-        output_att_cons = model(batch_feats, label_emb[idx_3].to(device))
-
-        logits.append(torch.log_softmax(output_att_cons, dim=-1))
-        logits.append(torch.log_softmax(output_att_f, dim=-1))
-        # Use entropy-based attention for consistency loss
-        loss_consis = consis_loss_entropy_attention(logits, args.tem, args.lam)
+        # Use multihead attention or entropy-based attention for consistency loss
+        if use_mha:
+            loss_consis = consis_loss_multihead_attention(logits, args.tem, args.lam, mha_module)
+        else:
+            loss_consis = consis_loss_entropy_attention(logits, args.tem, args.lam)
 
         L1 = loss_fcn(output_att[:len(idx_1)],  y)*(len(idx_1)*1.0/(len(idx_1)+len(idx_2)))
         teacher_soft = predict_prob[idx_2].to(device)
