@@ -12,7 +12,7 @@ import gc
 from copy import deepcopy
 
 import os
-from model import EMA
+from model import EMA, ConsistencyMultiheadAttention
 from load_dataset import *
 from utils import *
 
@@ -136,8 +136,29 @@ def run(args, device):
         print("# Params:", get_n_params(model))
 
         loss_fcn = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
-                                    weight_decay=args.weight_decay)
+        
+        # Initialize multihead attention module for consistency loss if enabled
+        # Note: MHA is only used in stage > 0 when consis=True
+        mha_module = None
+        if args.consis and getattr(args, 'use_mha', False) and stage > 0:
+            num_passes = getattr(args, 'num_passes', 2)
+            d_model = getattr(args, 'mha_d_model', None)  # None means use num_classes
+            mha_module = ConsistencyMultiheadAttention(
+                num_classes=num_classes,
+                num_heads=num_passes,
+                d_model=d_model,
+                dropout=getattr(args, 'mha_dropout', 0.1)
+            ).to(device)
+            print(f"Using Multihead Attention: num_heads={num_passes}, d_model={d_model or num_classes}")
+            # Add MHA parameters to optimizer
+            optimizer = torch.optim.Adam(
+                list(model.parameters()) + list(mha_module.parameters()),
+                lr=args.lr,
+                weight_decay=args.weight_decay
+            )
+        else:
+            optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
+                                        weight_decay=args.weight_decay)
         
         
         if args.giant and args.method == "SAGN":
@@ -220,7 +241,7 @@ def run(args, device):
                         loss, acc = train(model, feats, labels, device, loss_fcn, optimizer, train_loader, label_emb, evaluator,args, ema)
                     elif stage != 0 and args.consis == True:
                         loss, acc = train_rlu_consis(model, train_loader, enhance_loader, optimizer, evaluator, device, feats, labels,
-                                          label_emb, predict_prob, args, enhance_loader_cons)
+                                          label_emb, predict_prob, args, enhance_loader_cons, mha_module)
                     elif stage != 0 and args.consis == False:
                         loss, acc = train_rlu(model, train_loader, enhance_loader, optimizer, evaluator, device, feats, labels,
                                               label_emb, predict_prob, args.gama)
@@ -378,6 +399,14 @@ if __name__ == "__main__":
                         help="Whether to use consistency loss")
     parser.add_argument("--tem", type=float, default=0.5)
     parser.add_argument("--lam", type=float, default=0.1)
+    parser.add_argument("--num-passes", type=int, default=2,
+                        help="Number of forward passes (K) for consistency loss with dropout")
+    parser.add_argument("--use-mha", action='store_true', default=False,
+                        help="Use learnable multihead attention instead of entropy attention")
+    parser.add_argument("--mha-d-model", type=int, default=None,
+                        help="Projection dimension for multihead attention (default: num_classes)")
+    parser.add_argument("--mha-dropout", type=float, default=0.1,
+                        help="Dropout rate for multihead attention weights")
     
     #sagn
     parser.add_argument("--weight-style", type=str, default="attention")
