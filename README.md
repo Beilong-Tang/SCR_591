@@ -1,3 +1,10 @@
-## Results
+## 2025F ECE 591 Final Proejct - Self Consistency Regularization
 
-Baseline: 0.8494 and 0.8489
+'beilong' contains code and experiments implemented by Beilong Tang.
+- 'lambda_adaptive': Linear lambda
+- 'lambda_adaptive_fixed_stage': Staged lambda
+- 'fgsm': FGSM
+- 'fgsm_noise_gaussian': Gaussian Noise
+
+'sihao' contains code and experiments implemented by Sihao Liu.
+- Attention masking
